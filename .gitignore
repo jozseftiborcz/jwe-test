@@ -1,0 +1,7 @@
+# Keys — never commit. Regenerate with the openssl commands in README.md.
+*.pem
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]

@@ -27,7 +27,7 @@ key) would just waste cycles without buying extra security.
 | Piece                   | Choice                  | Why                                                                              |
 |-------------------------|-------------------------|----------------------------------------------------------------------------------|
 | Recipient key pair      | **EC P-256** (`prime256v1` / `secp256r1`) | The EC curve that provides ≈128-bit security — matches AES-128.       |
-| Key management (`alg`)  | **ECDH-ES+A128KW**      | Ephemeral-static ECDH → shared secret → AES-128 key-wraps a random CEK. Gives **perfect forward secrecy** per message. |
+| Key management (`alg`)  | **ECDH-ES** (Direct Key Agreement) | Ephemeral-static ECDH → shared secret used **directly** as the Content Encryption Key (no key-wrap step, so the `encrypted_key` segment is empty). Gives **perfect forward secrecy** per message. |
 | Content encryption (`enc`) | **A128GCM**          | AES-128 in GCM — authenticated encryption, one primitive for confidentiality + integrity. |
 | Serialization           | JWE **Compact**         | 5 dot-separated base64url segments, URL-safe.                                   |
 
@@ -37,6 +37,10 @@ The resulting token looks like:
 BASE64URL(header) . BASE64URL(encrypted_key) . BASE64URL(iv)
                   . BASE64URL(ciphertext)    . BASE64URL(tag)
 ```
+
+With `alg=ECDH-ES` (direct), the `encrypted_key` segment is empty — the
+token still has 5 dot-separated parts, but the second one is a zero-length
+string (`..`).
 
 ## Files
 
@@ -93,16 +97,16 @@ python jwe_example.py
 1. **Load** Bob's private and public keys from the PEM files, convert them
    to JWK so we can see the raw `x`, `y`, `d` parameters.
 2. **Build** the JWT claim set (standard + `name`, `email`, `phone`).
-3. **Choose** the JWE protected header: `alg=ECDH-ES+A128KW`,
-   `enc=A128GCM`, `typ=JWT`, plus a `kid` so Bob knows which key to use.
+3. **Choose** the JWE protected header: `alg=ECDH-ES`, `enc=A128GCM`,
+   `typ=JWT`, plus a `kid` so Bob knows which key to use.
 4. **Encrypt**. Under the hood jwcrypto:
    1. generates a fresh ephemeral EC P-256 key pair,
    2. runs ECDH with Bob's public key → shared secret `Z`,
-   3. derives a 128-bit Key-Encryption Key via Concat-KDF (SHA-256) — RFC 7518 §4.6,
-   4. generates a random 128-bit Content Encryption Key (CEK),
-   5. AES-128 key-wraps the CEK with the KEK,
-   6. AES-128-GCM encrypts `JSON(claims)` under the CEK,
-   7. emits the 5-part compact JWE.
+   3. derives a 128-bit Content Encryption Key directly via Concat-KDF
+      (SHA-256) — RFC 7518 §4.6. No separate key-wrap step.
+   4. AES-128-GCM encrypts `JSON(claims)` under the CEK,
+   5. emits the 5-part compact JWE (with an empty `encrypted_key`
+      segment, since the CEK was derived, not wrapped).
 5. **Peek** at the protected header without decrypting — this is how a
    recipient picks the right private key (`kid`).
 6. **Decrypt** with Bob's private key, pinning the accepted algorithms
@@ -134,7 +138,7 @@ python jwe_example.py
 ```
 [4] JWE protected header (will travel in clear, b64url-encoded):
 {
-  "alg": "ECDH-ES+A128KW",
+  "alg": "ECDH-ES",
   "enc": "A128GCM",
   "kid": "bob-ec-p256-2026",
   "typ": "JWT"
@@ -156,7 +160,56 @@ eyJhbGciOiJFQ0RILUVTK0ExMjhLVyIs...
       InvalidJWEData: No recipient matched the provided key ['Failed: [InvalidTag()]']
 ```
 
-## 6. Further reading
+## 6. Appendix: keys, certificates, and key usage
+
+Background concepts that sit underneath the JWE choices above.
+
+### Keys vs certificates
+
+A cryptographic **key pair** consists of:
+
+- **Private key** — kept secret; used for signing, decryption (RSA),
+  or key agreement (EC).
+- **Public key** — shared; used for signature verification, encryption
+  (RSA), or key agreement (EC).
+
+A **certificate** (X.509) is a *container for a public key plus
+metadata*, signed by a CA (or self-signed). It includes:
+
+- Subject (identity)
+- Public key
+- Validity period
+- Issuer
+- Key Usage constraints
+
+A certificate does **not** add cryptographic capability — it only
+describes and constrains how the key should be used.
+
+### Key Usage (X.509)
+
+Key Usage declares the allowed operations for a key.
+
+| Key Usage         | Meaning                                  |
+|-------------------|------------------------------------------|
+| `digitalSignature`| Signing (JWT, TLS auth)                  |
+| `keyEncipherment` | Encrypting keys (RSA)                    |
+| `keyAgreement`    | Deriving shared secrets (EC / DH)        |
+| `dataEncipherment`| Encrypting raw data (rare)               |
+
+Key Usage is a **policy constraint**, not a cryptographic one — the
+maths doesn't stop you using the key another way. Enforcement comes
+from TLS stacks, HSMs, and enterprise PKI.
+
+### RSA vs EC
+
+- **RSA** supports both signatures and encryption directly.
+- **EC** (Elliptic Curve) supports signatures (ECDSA / EdDSA) and
+  **key agreement** (ECDH); there is no direct "encrypt with EC public
+  key" primitive. JWE handles this by using ECDH to derive a symmetric
+  key that then encrypts the payload — which is exactly what
+  `alg=ECDH-ES` does in this tutorial.
+
+## 7. Further reading
 
 - RFC 7516 — JSON Web Encryption (JWE)
 - RFC 7518 — JSON Web Algorithms (JWA), esp. §4.6 (ECDH-ES) and §5.3 (A*GCM)

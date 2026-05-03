@@ -9,12 +9,20 @@ Crypto (128-bit security tier):
 ECDH-ES (Direct Key Agreement): the shared secret derived via ECDH is used
 directly as the Content Encryption Key — no separate key-wrap step, so the
 JWE's "encrypted_key" segment is empty.
+
+Key source (checked in order):
+    1. recipient-cert.pem  — CA-signed X.509 certificate; the EC public key
+                             is extracted from it at runtime.
+    2. recipient-pub.pem   — bare EC public key (fallback).
+Run setup_keys.sh first to generate both.
 """
 
 import json
 from pathlib import Path
 from urllib.parse import quote
 
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from jwcrypto import jwk, jwt
 
 
@@ -25,11 +33,30 @@ def banner(title: str) -> None:
     print(f"\n─── {title} " + "─" * (68 - len(title)))
 
 
-# 1. Load Bob's key pair (in reality the sender only has the public half).
+# 1. Load Bob's key pair.
+#    Public key preference: extract from the CA-signed certificate when present,
+#    fall back to the bare public-key PEM otherwise.
 banner("1. load keys")
-recipient_pub = jwk.JWK.from_pem((HERE / "recipient-pub.pem").read_bytes())
-recipient_priv = jwk.JWK.from_pem((HERE / "recipient-key.pem").read_bytes())
-print(f"curve = {recipient_pub['crv']}   (P-256 → 128-bit security)")
+
+cert_path = HERE / "recipient-cert.pem"
+pub_path  = HERE / "recipient-pub.pem"
+priv_path = HERE / "recipient-key.pem"
+
+if cert_path.exists():
+    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    pub_pem = cert.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    recipient_pub = jwk.JWK.from_pem(pub_pem)
+    print(f"public key source : {cert_path.name}  (EC key extracted from CA-signed cert)")
+    issuer = cert.issuer.rfc4514_string()
+    subject = cert.subject.rfc4514_string()
+    print(f"cert subject      : {subject}")
+    print(f"cert issuer       : {issuer}")
+else:
+    recipient_pub = jwk.JWK.from_pem(pub_path.read_bytes())
+    print(f"public key source : {pub_path.name}  (bare public key)")
+
+recipient_priv = jwk.JWK.from_pem(priv_path.read_bytes())
+print(f"curve             : {recipient_pub['crv']}   (P-256 → 128-bit security)")
 
 # 2. Build the claims.
 banner("2. claims to encrypt")
